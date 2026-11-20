@@ -80,6 +80,14 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 .log .when { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .log .buy { color: var(--good); font-weight: 500; }
 .empty { color: var(--muted); font-size: 15px; margin: 0; }
+.log li { align-items: center; }
+.log .what { flex: 1 1 auto; min-width: 0; }
+.log .del { flex: none; border: 1px solid var(--line); background: #FFF; color: var(--muted); border-radius: 8px; width: 34px; height: 34px; font-size: 18px; line-height: 1; padding: 0; }
+.log-tools { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between; }
+.log-tools .note { margin: 0; }
+.btn.small { padding: 9px 14px; font-size: 14px; }
+.btn.danger { background: #FFF; color: var(--warn); border: 1px solid var(--warn); }
+.btn.danger.armed { background: var(--warn); color: #FFF; }
 </style>
 </head>
 <body>
@@ -162,10 +170,15 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
         <h2>기록</h2>
         <ul class="log" id="log"></ul>
         <p class="empty" id="logEmpty">아직 기록이 없다. 쿠폰을 구입하거나 사용하면 날짜와 함께 여기에 남는다.</p>
-        <div class="undo-row" id="logTools" hidden>
-          <button class="link" id="logMore" type="button"></button>
-          <button class="link" id="logClear" type="button">기록 지우기</button>
+        <div class="log-tools" id="logTools" hidden>
+          <button class="btn ghost small" id="logMore" type="button"></button>
+          <button class="btn danger small" id="logClear" type="button">기록 전체 지우기</button>
         </div>
+        <div class="log-tools" id="logUndoRow" hidden>
+          <p class="note" id="logUndoMsg"></p>
+          <button class="link" id="logUndo" type="button">되돌리기</button>
+        </div>
+        <p class="note">기록을 지워도 남은 횟수와 사용 기간은 바뀌지 않는다.</p>
       </section>
 
       <details class="panel" id="settings">
@@ -252,7 +265,8 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
       months: [1, 2, 3].indexOf(Number(s.months)) >= 0 ? Number(s.months) : 0,
       auto: !!s.auto, test: s.test === undefined ? true : !!s.test,
       thr: Math.min(40, Math.max(1, thr)),
-      log: Array.isArray(s.log) ? s.log.slice(0, 5000).map(function (e) {
+      cut: Number(s.cut) || 0,
+      log: Array.isArray(s.log) ? s.log.slice(0, 300).map(function (e) {
         return { t: Number(e.t) || 0, k: String(e.k || ''), n: Number(e.n) || 0, a: !!e.a, m: Number(e.m) || 0 };
       }) : []
     };
@@ -260,6 +274,25 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
   function save() { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {} }
   function load() { try { var s = JSON.parse(localStorage.getItem(KEY)); if (s) state = norm(s); } catch (e) {} }
   function commit() { save(); render(); }
+
+  /* ---------- 기록 접기와 지우기 ----------
+     기록은 최근 몇 건만 보이고 나머지는 접어 둔다. 기록을 지워도 횟수와 기간은 그대로 둔다.
+     지운 기록보다 앞선 사용은 "방금 사용 취소"로 되돌리지 못하게 cut 시각을 남긴다. */
+  var LOG_SHORT = 5;
+  var logOpen = false;
+  var removed = null, removedTimer = null;
+  function removeLog(idxs) {
+    var set = {}; idxs.forEach(function (i) { set[i] = true; });
+    var items = [], keep = [];
+    state.log.forEach(function (e, i) { if (set[i]) items.push({ i: i, e: e }); else keep.push(e); });
+    if (!items.length) return;
+    removed = { items: items, cut: state.cut };
+    state.log = keep;
+    state.cut = Date.now();
+    clearTimeout(removedTimer);
+    removedTimer = setTimeout(function () { removed = null; render(); }, 15000);
+    commit();
+  }
 
   var DAYS = ['일', '월', '화', '수', '목', '금', '토'];
   function fmtDate(t) {
@@ -287,7 +320,6 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
     return d.getTime();
   }
 
-  var logAll = false, clearArmed = false, clearTimer = null;
   var flashTimer = null;
   function flash(msg) {
     var el = $('flash');
@@ -349,25 +381,32 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
     useBtn.textContent = state.remaining > 0 ? '1회 사용' : (state.total > 0 ? '쿠폰을 모두 썼다' : '쿠폰 횟수를 먼저 입력한다');
 
     var last = state.log[0];
-    $('undoBtn').disabled = !(last && last.k === 'use');
+    $('undoBtn').disabled = !canUndo();
     var lastUse = state.log.find(function (e) { return e.k === 'use'; });
     $('lastUse').textContent = lastUse ? '마지막 사용 ' + fmtDate(lastUse.t) : '';
 
     var ul = $('log'); ul.textContent = '';
-    var shown = logAll ? state.log : state.log.slice(0, 5);
-    shown.forEach(function (e) {
+    var shown = logOpen ? state.log : state.log.slice(0, LOG_SHORT);
+    shown.forEach(function (e, idx) {
       var li = document.createElement('li'), what = document.createElement('span'), when = document.createElement('span');
+      what.className = 'what';
       if (e.k === 'use') what.textContent = e.a ? '1회 사용 (자동 감지)' : '1회 사용';
-      else if (e.k === 'buy') { what.textContent = '구입 +' + e.n + '회' + (e.m ? ' (' + e.m + '개월)' : ''); what.className = 'buy'; }
+      else if (e.k === 'buy') { what.textContent = '구입 +' + e.n + '회' + (e.m ? ' (' + e.m + '개월)' : ''); what.className = 'what buy'; }
       else what.textContent = '강제로 맞춤 (남은 횟수 ' + e.n + '회)';
       when.className = 'when'; when.textContent = fmtDate(e.t);
-      li.appendChild(what); li.appendChild(when); ul.appendChild(li);
+      var del = document.createElement('button');
+      del.type = 'button'; del.className = 'del'; del.textContent = '×';
+      del.setAttribute('aria-label', '이 기록 지우기');
+      del.addEventListener('click', function () { removeLog([idx]); });
+      li.appendChild(what); li.appendChild(when); li.appendChild(del); ul.appendChild(li);
     });
     $('logEmpty').hidden = state.log.length > 0;
     $('logTools').hidden = state.log.length === 0;
-    $('logMore').hidden = state.log.length <= 5;
-    $('logMore').textContent = logAll ? '최근 5건만 보기' : '전체 ' + state.log.length + '건 보기';
-    $('logClear').textContent = clearArmed ? '한 번 더 누르면 기록을 모두 지운다' : '기록 지우기';
+    var more = $('logMore');
+    more.hidden = state.log.length <= LOG_SHORT;
+    more.textContent = logOpen ? '최근 ' + LOG_SHORT + '건만 보기' : '전체 보기 (' + state.log.length + '건)';
+    $('logUndoRow').hidden = !removed;
+    if (removed) $('logUndoMsg').textContent = '기록 ' + removed.items.length + '건을 지웠다.';
 
     var active = document.activeElement;
     if (active !== $('cardName')) $('cardName').value = state.name;
@@ -398,20 +437,30 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
   }
 
   $('useBtn').addEventListener('click', function () { useOne(false); });
-  $('logMore').addEventListener('click', function () { logAll = !logAll; render(); });
+  function canUndo() { var l = state.log[0]; return !!(l && l.k === 'use' && l.t > state.cut); }
+  $('logMore').addEventListener('click', function () { logOpen = !logOpen; render(); });
+  var clearArmTimer = null;
   $('logClear').addEventListener('click', function () {
-    clearTimeout(clearTimer);
-    if (!clearArmed) {
-      clearArmed = true;
-      clearTimer = setTimeout(function () { clearArmed = false; render(); }, 4000);
-      render(); return;
+    var b = this;
+    if (!b.classList.contains('armed')) {
+      b.classList.add('armed'); b.textContent = '한 번 더 누르면 모두 지운다';
+      clearTimeout(clearArmTimer);
+      clearArmTimer = setTimeout(function () { b.classList.remove('armed'); b.textContent = '기록 전체 지우기'; }, 4000);
+      return;
     }
-    clearArmed = false; logAll = false;
-    state.log = [];            // 남은 횟수와 사용 기간은 그대로 두고 기록 목록만 비운다
-    commit();
+    clearTimeout(clearArmTimer);
+    b.classList.remove('armed'); b.textContent = '기록 전체 지우기';
+    removeLog(state.log.map(function (_, i) { return i; }));
+    logOpen = false; render();
+  });
+  $('logUndo').addEventListener('click', function () {
+    if (!removed) return;
+    removed.items.forEach(function (x) { state.log.splice(Math.min(x.i, state.log.length), 0, x.e); });
+    state.log.sort(function (a, b) { return b.t - a.t; });
+    state.cut = removed.cut; removed = null; clearTimeout(removedTimer); commit();
   });
   $('undoBtn').addEventListener('click', function () {
-    if (!(state.log[0] && state.log[0].k === 'use')) return;
+    if (!canUndo()) return;
     state.log.shift(); state.remaining += 1; $('flash').hidden = true; commit();
   });
   $('buyForm').addEventListener('submit', function (ev) {
@@ -456,6 +505,19 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
   var cv = document.createElement('canvas'); cv.width = 32; cv.height = 24;
   var ctx = cv.getContext('2d', { willReadFrequently: true });
 
+  /* 화면 켜짐 유지: 불빛 감지가 켜져 있을 때만 화면을 켜 두고, 끄면 폰의 자동 잠금에 맡긴다. */
+  var wake = null, offTimer = null;
+  var OFF_AFTER_MS = 10 * 1000;   // 실제 차감 뒤 10초가 지나면 감지를 끈다
+  async function wakeOn() {
+    try { if (navigator.wakeLock && !wake) { wake = await navigator.wakeLock.request('screen'); wake.addEventListener('release', function () { wake = null; }); } } catch (e) { wake = null; }
+  }
+  function wakeOff() { try { if (wake) wake.release(); } catch (e) {} wake = null; }
+  function autoOff() {
+    clearTimeout(offTimer); offTimer = null;
+    state.auto = false; camStop(); commit();
+    camNote('차감 뒤 10초가 지나 불빛 감지를 껐다. 이제 화면은 폰의 자동 잠금 시간에 맞춰 꺼진다.');
+  }
+
   function camNote(msg, err) { var n = $('camNote'); n.textContent = msg; n.classList.toggle('err', !!err); }
 
   async function camStart() {
@@ -477,6 +539,7 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
     cam.hits = 0; cam.base = null; cam.peak = 0;
     cam.timer = setInterval(tick, 70);
     $('camBox').hidden = false;
+    wakeOn();
     camNote('카메라 영상은 이 폰 안에서 밝기와 색만 계산하고, 저장하거나 어디로도 보내지 않는다.');
     return true;
   }
@@ -485,6 +548,7 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
     if (cam.stream) { cam.stream.getTracks().forEach(function (t) { t.stop(); }); cam.stream = null; }
     video.srcObject = null;
     $('camBox').hidden = true;
+    wakeOff();
   }
 
   function tick() {
@@ -519,13 +583,15 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
       flash('불빛을 감지했다. 시험 모드라서 횟수는 줄이지 않았다.');
     } else if (useOne(true)) {
       cam.lockUntil = now + LOCK_MS;
-      flash('스캐너 불빛을 감지해 1회 차감했다. 잘못 감지했으면 "방금 사용 취소"를 누른다.');
+      flash('스캐너 불빛을 감지해 1회 차감했다. 10초 뒤 감지를 끈다. 잘못 감지했으면 "방금 사용 취소"를 누른다.');
+      clearTimeout(offTimer); offTimer = setTimeout(autoOff, OFF_AFTER_MS);
     }
     try { if (navigator.vibrate) navigator.vibrate(120); } catch (e) {}
   }
 
   $('autoOn').addEventListener('change', async function () {
     state.auto = this.checked;
+    clearTimeout(offTimer); offTimer = null;
     if (state.auto) { var ok = await camStart(); if (!ok) state.auto = false; } else camStop();
     commit();
   });
@@ -538,7 +604,6 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
   load();
   render();
   if (state.auto) camStart();
-  try { if (navigator.wakeLock) navigator.wakeLock.request('screen').catch(function () {}); } catch (e) {}
 })();
 </script>
 </body>
