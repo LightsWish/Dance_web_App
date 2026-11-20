@@ -80,14 +80,6 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 .log .when { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .log .buy { color: var(--good); font-weight: 500; }
 .empty { color: var(--muted); font-size: 15px; margin: 0; }
-.log li { align-items: center; }
-.log .what { flex: 1 1 auto; min-width: 0; }
-.log .del { flex: none; border: 1px solid var(--line); background: #FFF; color: var(--muted); border-radius: 8px; width: 34px; height: 34px; font-size: 18px; line-height: 1; padding: 0; }
-.log-tools { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between; }
-.log-tools .note { margin: 0; }
-.btn.small { padding: 9px 14px; font-size: 14px; }
-.btn.danger { background: #FFF; color: var(--warn); border: 1px solid var(--warn); }
-.btn.danger.armed { background: var(--warn); color: #FFF; }
 </style>
 </head>
 <body>
@@ -170,15 +162,10 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
         <h2>기록</h2>
         <ul class="log" id="log"></ul>
         <p class="empty" id="logEmpty">아직 기록이 없다. 쿠폰을 구입하거나 사용하면 날짜와 함께 여기에 남는다.</p>
-        <div class="log-tools" id="logTools" hidden>
-          <button class="btn ghost small" id="logMore" type="button"></button>
-          <button class="btn danger small" id="logClear" type="button">기록 전체 지우기</button>
+        <div class="undo-row" id="logTools" hidden>
+          <button class="link" id="logMore" type="button"></button>
+          <button class="link" id="logClear" type="button">기록 지우기</button>
         </div>
-        <div class="log-tools" id="logUndoRow" hidden>
-          <p class="note" id="logUndoMsg"></p>
-          <button class="link" id="logUndo" type="button">되돌리기</button>
-        </div>
-        <p class="note">기록을 지워도 남은 횟수와 사용 기간은 바뀌지 않는다.</p>
       </section>
 
       <details class="panel" id="settings">
@@ -265,8 +252,7 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
       months: [1, 2, 3].indexOf(Number(s.months)) >= 0 ? Number(s.months) : 0,
       auto: !!s.auto, test: s.test === undefined ? true : !!s.test,
       thr: Math.min(40, Math.max(1, thr)),
-      cut: Number(s.cut) || 0,
-      log: Array.isArray(s.log) ? s.log.slice(0, 300).map(function (e) {
+      log: Array.isArray(s.log) ? s.log.slice(0, 5000).map(function (e) {
         return { t: Number(e.t) || 0, k: String(e.k || ''), n: Number(e.n) || 0, a: !!e.a, m: Number(e.m) || 0 };
       }) : []
     };
@@ -274,25 +260,6 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
   function save() { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {} }
   function load() { try { var s = JSON.parse(localStorage.getItem(KEY)); if (s) state = norm(s); } catch (e) {} }
   function commit() { save(); render(); }
-
-  /* ---------- 기록 접기와 지우기 ----------
-     기록은 최근 몇 건만 보이고 나머지는 접어 둔다. 기록을 지워도 횟수와 기간은 그대로 둔다.
-     지운 기록보다 앞선 사용은 "방금 사용 취소"로 되돌리지 못하게 cut 시각을 남긴다. */
-  var LOG_SHORT = 5;
-  var logOpen = false;
-  var removed = null, removedTimer = null;
-  function removeLog(idxs) {
-    var set = {}; idxs.forEach(function (i) { set[i] = true; });
-    var items = [], keep = [];
-    state.log.forEach(function (e, i) { if (set[i]) items.push({ i: i, e: e }); else keep.push(e); });
-    if (!items.length) return;
-    removed = { items: items, cut: state.cut };
-    state.log = keep;
-    state.cut = Date.now();
-    clearTimeout(removedTimer);
-    removedTimer = setTimeout(function () { removed = null; render(); }, 15000);
-    commit();
-  }
 
   var DAYS = ['일', '월', '화', '수', '목', '금', '토'];
   function fmtDate(t) {
@@ -320,6 +287,7 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
     return d.getTime();
   }
 
+  var logAll = false, clearArmed = false, clearTimer = null;
   var flashTimer = null;
   function flash(msg) {
     var el = $('flash');
@@ -381,32 +349,25 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
     useBtn.textContent = state.remaining > 0 ? '1회 사용' : (state.total > 0 ? '쿠폰을 모두 썼다' : '쿠폰 횟수를 먼저 입력한다');
 
     var last = state.log[0];
-    $('undoBtn').disabled = !canUndo();
+    $('undoBtn').disabled = !(last && last.k === 'use');
     var lastUse = state.log.find(function (e) { return e.k === 'use'; });
     $('lastUse').textContent = lastUse ? '마지막 사용 ' + fmtDate(lastUse.t) : '';
 
     var ul = $('log'); ul.textContent = '';
-    var shown = logOpen ? state.log : state.log.slice(0, LOG_SHORT);
-    shown.forEach(function (e, idx) {
+    var shown = logAll ? state.log : state.log.slice(0, 5);
+    shown.forEach(function (e) {
       var li = document.createElement('li'), what = document.createElement('span'), when = document.createElement('span');
-      what.className = 'what';
       if (e.k === 'use') what.textContent = e.a ? '1회 사용 (자동 감지)' : '1회 사용';
-      else if (e.k === 'buy') { what.textContent = '구입 +' + e.n + '회' + (e.m ? ' (' + e.m + '개월)' : ''); what.className = 'what buy'; }
+      else if (e.k === 'buy') { what.textContent = '구입 +' + e.n + '회' + (e.m ? ' (' + e.m + '개월)' : ''); what.className = 'buy'; }
       else what.textContent = '강제로 맞춤 (남은 횟수 ' + e.n + '회)';
       when.className = 'when'; when.textContent = fmtDate(e.t);
-      var del = document.createElement('button');
-      del.type = 'button'; del.className = 'del'; del.textContent = '×';
-      del.setAttribute('aria-label', '이 기록 지우기');
-      del.addEventListener('click', function () { removeLog([idx]); });
-      li.appendChild(what); li.appendChild(when); li.appendChild(del); ul.appendChild(li);
+      li.appendChild(what); li.appendChild(when); ul.appendChild(li);
     });
     $('logEmpty').hidden = state.log.length > 0;
     $('logTools').hidden = state.log.length === 0;
-    var more = $('logMore');
-    more.hidden = state.log.length <= LOG_SHORT;
-    more.textContent = logOpen ? '최근 ' + LOG_SHORT + '건만 보기' : '전체 보기 (' + state.log.length + '건)';
-    $('logUndoRow').hidden = !removed;
-    if (removed) $('logUndoMsg').textContent = '기록 ' + removed.items.length + '건을 지웠다.';
+    $('logMore').hidden = state.log.length <= 5;
+    $('logMore').textContent = logAll ? '최근 5건만 보기' : '전체 ' + state.log.length + '건 보기';
+    $('logClear').textContent = clearArmed ? '한 번 더 누르면 기록을 모두 지운다' : '기록 지우기';
 
     var active = document.activeElement;
     if (active !== $('cardName')) $('cardName').value = state.name;
@@ -437,30 +398,20 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
   }
 
   $('useBtn').addEventListener('click', function () { useOne(false); });
-  function canUndo() { var l = state.log[0]; return !!(l && l.k === 'use' && l.t > state.cut); }
-  $('logMore').addEventListener('click', function () { logOpen = !logOpen; render(); });
-  var clearArmTimer = null;
+  $('logMore').addEventListener('click', function () { logAll = !logAll; render(); });
   $('logClear').addEventListener('click', function () {
-    var b = this;
-    if (!b.classList.contains('armed')) {
-      b.classList.add('armed'); b.textContent = '한 번 더 누르면 모두 지운다';
-      clearTimeout(clearArmTimer);
-      clearArmTimer = setTimeout(function () { b.classList.remove('armed'); b.textContent = '기록 전체 지우기'; }, 4000);
-      return;
+    clearTimeout(clearTimer);
+    if (!clearArmed) {
+      clearArmed = true;
+      clearTimer = setTimeout(function () { clearArmed = false; render(); }, 4000);
+      render(); return;
     }
-    clearTimeout(clearArmTimer);
-    b.classList.remove('armed'); b.textContent = '기록 전체 지우기';
-    removeLog(state.log.map(function (_, i) { return i; }));
-    logOpen = false; render();
-  });
-  $('logUndo').addEventListener('click', function () {
-    if (!removed) return;
-    removed.items.forEach(function (x) { state.log.splice(Math.min(x.i, state.log.length), 0, x.e); });
-    state.log.sort(function (a, b) { return b.t - a.t; });
-    state.cut = removed.cut; removed = null; clearTimeout(removedTimer); commit();
+    clearArmed = false; logAll = false;
+    state.log = [];            // 남은 횟수와 사용 기간은 그대로 두고 기록 목록만 비운다
+    commit();
   });
   $('undoBtn').addEventListener('click', function () {
-    if (!canUndo()) return;
+    if (!(state.log[0] && state.log[0].k === 'use')) return;
     state.log.shift(); state.remaining += 1; $('flash').hidden = true; commit();
   });
   $('buyForm').addEventListener('submit', function (ev) {
